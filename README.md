@@ -117,7 +117,7 @@ The model was trained on user-item interaction data and saved as `best_ncf_model
 🔥 With this setup, you can train, save, and serve your recommendation system in just a few steps!
 
 ---
-creator :kiran
+creator :kiran Gowda 
 
 
 
