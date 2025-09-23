@@ -1,0 +1,150 @@
+version: '3.8'
+
+services:
+  # Main application service
+  neural-recommender:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neural-recommender-app
+    ports:
+      - "8080:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - ENVIRONMENT=development
+    volumes:
+      - ./mlruns:/app/mlruns
+      - ./data:/app/data
+    depends_on:
+      - mlflow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from inference import ModelInference; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # MLflow tracking server
+  mlflow:
+    image: python:3.9-slim
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - ./mlruns:/mlflow/mlruns
+      - ./mlflow-data:/mlflow/artifacts
+      - ./mlflow.db:/mlflow.db
+    command: >
+      sh -c "
+        pip install mlflow[extras]==3.3.2 &&
+        mlflow server
+        --backend-store-uri sqlite:///mlflow.db
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+      "
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Jupyter notebook for experimentation
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: neural-recommender-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    volumes:
+      - ./:/home/jovyan/work
+      - ./notebooks:/home/jovyan/notebooks
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+    restart: unless-stopped
+
+  # Database for storing application data (optional)
+  postgres:
+    image: postgres:13
+    container_name: neural-recommender-db
+    environment:
+      - POSTGRES_DB=recommender
+      - POSTGRES_USER=recommender
+      - POSTGRES_PASSWORD=recommender123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recommender"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching predictions (optional)
+  redis:
+    image: redis:6-alpine
+    container_name: neural-recommender-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: neural-recommender-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: neural-recommender-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    driver: bridge
