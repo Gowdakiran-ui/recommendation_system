@@ -238,11 +238,12 @@ This project is licensed under the MIT License.
 
 ## 👥 Authors
 
-- Kiran Gowda - Initial development
-- AI Assistant - Pipeline automation
+- Kiran Gowda 
+
 
 ## 🔗 Links
 
 - [GitHub Repository](https://github.com/Gowdakiran-ui/recommendation_system.git)
 - [MLflow Documentation](https://mlflow.org/docs/latest/index.html)
+
 - [PyTorch Documentation](https://pytorch.org/docs/stable/index.html)
