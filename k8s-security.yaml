@@ -1,0 +1,271 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neural-recommender-secrets
+  namespace: neural-recommender
+type: Opaque
+data:
+  # Base64 encoded secrets
+  # Generate with: echo -n 'your-secret' | base64
+  mlflow-password: bXlmbG93MTIz  # mlflow123
+  db-password: cmVjb21tZW5kZXIxMjM=  # recommender123
+  grafana-password: Z3JhZmFuYTEyMw==  # grafana123
+  jwt-secret: eW91ci1qd3Qtc2VjcmV0LWtleQ==  # your-jwt-secret-key
+  api-key: eW91ci1hcGkta2V5LWhlcmU=  # your-api-key-here
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: neural-recommender-peer-auth
+  namespace: neural-recommender
+spec:
+  selector:
+    matchLabels:
+      app: neural-recommender
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: neural-recommender-authz
+  namespace: neural-recommender
+spec:
+  selector:
+    matchLabels:
+      app: neural-recommender
+      component: app
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/neural-recommender/sa/neural-recommender-sa"]
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/predict", "/recommend", "/health", "/metrics"]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: neural-recommender-vs
+  namespace: neural-recommender
+spec:
+  hosts:
+  - neural-recommender.example.com
+  gateways:
+  - neural-recommender-gateway
+  http:
+  - match:
+    - uri:
+        prefix: "/api/"
+    route:
+    - destination:
+        host: neural-recommender-service
+        port:
+          number: 80
+    corsPolicy:
+      allowOrigins:
+      - regex: ".*"
+      allowMethods:
+      - GET
+      - POST
+      - OPTIONS
+      allowHeaders:
+      - content-type
+      - authorization
+    timeout: 30s
+    retries:
+      attempts: 3
+      perTryTimeout: 10s
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: neural-recommender-gateway
+  namespace: neural-recommender
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - neural-recommender.example.com
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: neural-recommender-tls-secret
+    hosts:
+    - neural-recommender.example.com
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: neural-recommender-dr
+  namespace: neural-recommender
+spec:
+  host: neural-recommender-service
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 10
+    circuitBreaker:
+      consecutiveErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+apiVersion: v1
+kind: NetworkPolicy
+metadata:
+  name: neural-recommender-netpol
+  namespace: neural-recommender
+spec:
+  podSelector:
+    matchLabels:
+      app: neural-recommender
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+    - podSelector:
+        matchLabels:
+          app: neural-recommender
+    ports:
+    - protocol: TCP
+      port: 5000
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 5000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: neural-recommender
+          component: mlflow
+    ports:
+    - protocol: TCP
+      port: 5000
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: neural-recommender-limits
+  namespace: neural-recommender
+spec:
+  limits:
+  - default:
+      memory: "1Gi"
+      cpu: "500m"
+    defaultRequest:
+      memory: "256Mi"
+      cpu: "100m"
+    type: Container
+  - max:
+      memory: "4Gi"
+      cpu: "2000m"
+    min:
+      memory: "128Mi"
+      cpu: "50m"
+    type: Container
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: neural-recommender-quota
+  namespace: neural-recommender
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "4"
+    pods: "20"
+    services: "10"
+    secrets: "10"
+    configmaps: "10"
+---
+apiVersion: policy/v1
+kind: PodSecurityPolicy
+metadata:
+  name: neural-recommender-psp
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: neural-recommender-psp-use
+rules:
+- apiGroups: ['policy']
+  resources: ['podsecuritypolicies']
+  verbs: ['use']
+  resourceNames:
+  - neural-recommender-psp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: neural-recommender-psp-use
+roleRef:
+  kind: ClusterRole
+  name: neural-recommender-psp-use
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: neural-recommender-sa
+  namespace: neural-recommender

@@ -1,0 +1,377 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neural-recommender
+  labels:
+    app: neural-recommender
+    version: v1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neural-recommender-config
+  namespace: neural-recommender
+data:
+  ENVIRONMENT: "production"
+  MLFLOW_TRACKING_URI: "http://mlflow-service:5000"
+  PYTHONPATH: "/app"
+  MODEL_NAME: "neural_recommender"
+  SAMPLE_SIZE: "150000"
+  BATCH_SIZE: "512"
+  LOG_LEVEL: "INFO"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neural-recommender-secrets
+  namespace: neural-recommender
+type: Opaque
+data:
+  # Base64 encoded secrets
+  # echo -n 'your-secret' | base64
+  mlflow-password: bXlmbG93MTIz  # mlflow123
+  db-password: cmVjb21tZW5kZXIxMjM=  # recommender123
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neural-recommender-app
+  namespace: neural-recommender
+  labels:
+    app: neural-recommender
+    component: app
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: neural-recommender
+      component: app
+  template:
+    metadata:
+      labels:
+        app: neural-recommender
+        component: app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "5000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: neural-recommender
+        image: neural-recommender:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+          name: http
+          protocol: TCP
+        env:
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: neural-recommender-config
+              key: ENVIRONMENT
+        - name: MLFLOW_TRACKING_URI
+          valueFrom:
+            configMapKeyRef:
+              name: neural-recommender-config
+              key: MLFLOW_TRACKING_URI
+        - name: PYTHONPATH
+          valueFrom:
+            configMapKeyRef:
+              name: neural-recommender-config
+              key: PYTHONPATH
+        - name: MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: neural-recommender-config
+              key: MODEL_NAME
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "from inference import ModelInference; print('OK')"
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "from inference import ModelInference; print('OK')"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: mlruns-storage
+          mountPath: /app/mlruns
+        - name: model-cache
+          mountPath: /app/model-cache
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: mlruns-storage
+        persistentVolumeClaim:
+          claimName: mlruns-pvc
+      - name: model-cache
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: logs
+        emptyDir:
+          sizeLimit: 500Mi
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - key: "neural-recommender"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neural-recommender-service
+  namespace: neural-recommender
+  labels:
+    app: neural-recommender
+    component: app
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 5000
+    protocol: TCP
+    name: http
+  selector:
+    app: neural-recommender
+    component: app
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 300
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+  namespace: neural-recommender
+  labels:
+    app: neural-recommender
+    component: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neural-recommender
+      component: mlflow
+  template:
+    metadata:
+      labels:
+        app: neural-recommender
+        component: mlflow
+    spec:
+      containers:
+      - name: mlflow
+        image: python:3.9-slim
+        ports:
+        - containerPort: 5000
+          name: http
+        env:
+        - name: MLFLOW_BACKEND_STORE_URI
+          value: "sqlite:///mlflow/mlflow.db"
+        - name: MLFLOW_DEFAULT_ARTIFACT_ROOT
+          value: "/mlflow/artifacts"
+        command:
+        - sh
+        - -c
+        - |
+          pip install mlflow[extras]==3.3.2 &&
+          mlflow server \
+            --backend-store-uri sqlite:///mlflow/mlflow.db \
+            --default-artifact-root /mlflow/artifacts \
+            --host 0.0.0.0 \
+            --port 5000
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - name: mlflow-storage
+          mountPath: /mlflow
+      volumes:
+      - name: mlflow-storage
+        persistentVolumeClaim:
+          claimName: mlflow-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-service
+  namespace: neural-recommender
+  labels:
+    app: neural-recommender
+    component: mlflow
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5000
+    targetPort: 5000
+    protocol: TCP
+    name: http
+  selector:
+    app: neural-recommender
+    component: mlflow
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlruns-pvc
+  namespace: neural-recommender
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-pvc
+  namespace: neural-recommender
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: neural-recommender-ingress
+  namespace: neural-recommender
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-rps: "10"
+spec:
+  tls:
+  - hosts:
+    - neural-recommender.example.com
+    - mlflow.example.com
+    secretName: neural-recommender-tls
+  rules:
+  - host: neural-recommender.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: neural-recommender-service
+            port:
+              number: 80
+  - host: mlflow.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mlflow-service
+            port:
+              number: 5000
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: neural-recommender-hpa
+  namespace: neural-recommender
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: neural-recommender-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: neural-recommender-pdb
+  namespace: neural-recommender
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: neural-recommender
+      component: app
